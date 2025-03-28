@@ -1,10 +1,13 @@
+using System;
 using System.Collections.Generic;
+using System.Dynamic;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using Xbim.Ifc;
 using Xbim.Ifc4.Interfaces;
+using Xbim.Ifc4x3.ProductExtension;
 
 namespace XeokitMetadata {
   /// <summary>
@@ -32,6 +35,7 @@ namespace XeokitMetadata {
     ///   The GlobalId of the parent element if any.
     /// </summary>
     public string parent;
+    public List<dynamic> propertySets { get; set; }
   }
 
   /// <summary>
@@ -107,10 +111,9 @@ namespace XeokitMetadata {
     /// <returns>Returns the complete MetaModel of the IFC.</returns>
     public static MetaModel fromIfc(string ifcPath) {
       using (var model = IfcStore.Open(ifcPath)) {
-
         var project = model.Instances.FirstOrDefault<IIfcProject>();
-
         var header = model.Header;
+        
         var metaModel = new MetaModel();
         metaModel.init(
           project.Name,
@@ -120,8 +123,7 @@ namespace XeokitMetadata {
           header.SchemaVersion,
           header.CreatingApplication);
 
-        var metaObjects = extractHierarchy(project);
-        metaModel.metaObjects = metaObjects;
+        metaModel.metaObjects = extractHierarchy(project);
         return metaModel;
       }
     }
@@ -133,14 +135,7 @@ namespace XeokitMetadata {
     /// <param name="authors">List of authors.</param>
     /// <returns>Authors names.</returns>
     private static string getAuthor(IList<string> authors){
-      var author = "";
-      foreach (var item in authors) {
-        author += item;
-        //separator of authors
-        if (!item.Equals(authors.Last()))
-          author += ";";
-      }
-      return author;
+      return string.Join(";", authors);
     }
 
     /// <summary>
@@ -158,46 +153,117 @@ namespace XeokitMetadata {
     private static List<MetaObject> extractHierarchy(
       IIfcObjectDefinition objectDefinition, 
       string parentId=null) {
-      var metaObjects = new List<MetaObject>();
+        var metaObjects = new List<MetaObject>();
+        var parentObject = new MetaObject {
+          id = objectDefinition.GlobalId,
+          name = objectDefinition.Name,
+          type = objectDefinition.GetType().Name,
+          parent = parentId
+        };
 
-      var parentObject = new MetaObject {
-        id = objectDefinition.GlobalId,
-        name = objectDefinition.Name,
-        type = objectDefinition.GetType().Name,
-        parent = parentId
-      };
+        switch (objectDefinition)
+        {
+          case IfcBuiltElement spatialBuiltElement:
+          {
+            if (spatialBuiltElement != null)
+            {
+              var propertySets = spatialBuiltElement.IsDefinedBy
+                .Where(r => r.RelatingPropertyDefinition is IIfcPropertySet)
+                .Select(r => r.RelatingPropertyDefinition as IIfcPropertySet);
 
-      metaObjects.Add(parentObject);
+              var mo = CreateMetaObject(spatialBuiltElement, propertySets, parentId);
+              metaObjects.Add(mo);
+              extractRelatedObjects(spatialBuiltElement, ref metaObjects, mo.id);
+            }
+            break;
+          }
+          case IIfcSpatialStructureElement spatialElement:
+          {
+            if (spatialElement != null)
+            {
+              var containedElements = spatialElement
+                .ContainsElements
+                .SelectMany(rel => rel.RelatedElements);
 
-      var spatialElement = objectDefinition as IIfcSpatialStructureElement;
+              foreach (var element in containedElements)
+              {
+                var propertySets = element.IsDefinedBy
+                  .Where(r => r.RelatingPropertyDefinition is IIfcPropertySet)
+                  .Select(x => x.RelatingPropertyDefinition)
+                  .Cast<IIfcPropertySet>();
 
-      if (spatialElement != null) {
-        var containedElements = spatialElement
-          .ContainsElements
-          .SelectMany(rel => rel.RelatedElements);
+                var mo = CreateMetaObject(element, propertySets, spatialElement.GlobalId);
+                metaObjects.Add(mo);
+                extractRelatedObjects(element, ref metaObjects, mo.id);
+              }
+            }
+            break;
+          }
+          case IIfcBuildingElement buildingElement:
+          {
+            if (buildingElement != null)
+            {
+              var propertySets = buildingElement.IsDefinedBy
+                .Where(r => r.RelatingPropertyDefinition is IIfcPropertySet)
+                .Select(x => x.RelatingPropertyDefinition)
+                .Cast<IIfcPropertySet>();
 
-        foreach (var element in containedElements) {
-          var mo = new MetaObject {
-            id = element.GlobalId,
-            name = element.Name,
-            type = element.GetType().Name,
-            parent = spatialElement.GlobalId
-          };
-          
-          metaObjects.Add(mo);
-          extractRelatedObjects(
-            element, 
-            ref metaObjects, 
-            mo.id);
+              var mo = CreateMetaObject(buildingElement, propertySets, parentId);
+              metaObjects.Add(mo);
+              extractRelatedObjects(buildingElement, ref metaObjects, mo.id);
+            }
+            break;
+          }
         }
+
+        if (metaObjects.Count == 0)
+        {
+          metaObjects.Add(parentObject);
+        }
+        extractRelatedObjects(objectDefinition, ref metaObjects, parentObject.id);
+        return metaObjects;
+    }
+
+    private static MetaObject CreateMetaObject(
+      IIfcObjectDefinition element,
+      IEnumerable<IIfcPropertySet> propertySets,
+      string parentId)
+    {
+      var propSetNames = new List<string>();
+      List<dynamic> retVal = new List<dynamic>();
+      
+      foreach (var propSet in propertySets)
+      {
+        if (propSetNames.Contains(propSet.Name.ToString())) continue;
+        propSetNames.Add(propSet.Name.ToString());
+        
+        dynamic pSetDynamic = new ExpandoObject();
+        pSetDynamic.name = propSet.Name.ToString();
+        pSetDynamic.properties = new List<dynamic>();
+        
+        foreach (var property in propSet.HasProperties)
+        {
+          if (property is IIfcPropertySingleValue propSingleValue)
+          {
+            dynamic ppDynamic = new ExpandoObject();
+            ppDynamic.name = propSingleValue.Name.Value;
+            ppDynamic.value = propSingleValue.NominalValue == null
+              ? string.Empty
+              : propSingleValue.NominalValue.Value.ToString();
+            pSetDynamic.properties.Add(ppDynamic);
+          }
+        }
+        retVal.Add(pSetDynamic);
       }
 
-      extractRelatedObjects(
-        objectDefinition, 
-        ref metaObjects, 
-        parentObject.id);
-      
-      return metaObjects;
+      return new MetaObject
+      {
+        id = element.GlobalId,
+        name = element.Name,
+        type = element.GetType().Name,
+        parent = parentId,
+        propertySets = retVal
+      };
     }
 
     /// <summary>
@@ -252,11 +318,10 @@ namespace XeokitMetadata {
       
       var settings = new JsonSerializerSettings {
         ContractResolver = contractResolver,
-        Formatting = Formatting.Indented
+        Formatting = Formatting.None
       };
       
-      var output = JsonConvert.SerializeObject(this, settings);
-      return output;
+      return JsonConvert.SerializeObject(this, settings);
     }
-  }
+  }  
 }
