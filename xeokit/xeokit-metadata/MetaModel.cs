@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Dynamic;
 using System.IO;
 using System.Linq;
 using Newtonsoft.Json;
@@ -10,32 +9,49 @@ using Xbim.Ifc4.Interfaces;
 using Xbim.Ifc4x3.ProductExtension;
 
 namespace XeokitMetadata {
+
+  /// <summary>
+  ///   Strongly-typed property within a property set, replaces ExpandoObject.
+  /// </summary>
+  public class PropertyOutput {
+    [JsonProperty("name")]
+    public string Name { get; set; }
+
+    [JsonProperty("value")]
+    public string Value { get; set; }
+  }
+
+  /// <summary>
+  ///   Strongly-typed property set, replaces ExpandoObject.
+  /// </summary>
+  public class PropertySetOutput {
+    [JsonProperty("name")]
+    public string Name { get; set; }
+
+    [JsonProperty("properties")]
+    public List<PropertyOutput> Properties { get; set; } = new();
+  }
+
   /// <summary>
   ///   The MetaObject is used to serialise the building elements within the IFC
   ///   model. It is a representation of a single element (e.g. IfcProject,
   ///   IfcStorey, IfcWindow, etc.).
   /// </summary>
-  public struct MetaObject {
-    /// <summary>
-    ///   The GlobalId of the building element
-    /// </summary>
+  public class MetaObject {
+    [JsonProperty("id")]
     public string id;
 
-    /// <summary>
-    ///   The Name of the building element
-    /// </summary>
+    [JsonProperty("name")]
     public string name;
 
-    /// <summary>
-    ///   The IFC type of the building element, e.g. 'IfcStandardWallCase'
-    /// </summary>
+    [JsonProperty("type")]
     public string type;
 
-    /// <summary>
-    ///   The GlobalId of the parent element if any.
-    /// </summary>
+    [JsonProperty("parent")]
     public string parent;
-    public List<dynamic> propertySets { get; set; }
+
+    [JsonProperty("propertySets", NullValueHandling = NullValueHandling.Ignore)]
+    public List<PropertySetOutput> propertySets { get; set; }
   }
 
   /// <summary>
@@ -181,6 +197,8 @@ namespace XeokitMetadata {
           {
             if (spatialElement != null)
             {
+              metaObjects.Add(parentObject);
+
               var containedElements = spatialElement
                 .ContainsElements
                 .SelectMany(rel => rel.RelatedElements);
@@ -229,31 +247,29 @@ namespace XeokitMetadata {
       IEnumerable<IIfcPropertySet> propertySets,
       string parentId)
     {
-      var propSetNames = new List<string>();
-      List<dynamic> retVal = new List<dynamic>();
-      
+      var propSetNames = new HashSet<string>();
+      var retVal = new List<PropertySetOutput>();
+
       foreach (var propSet in propertySets)
       {
-        if (propSetNames.Contains(propSet.Name.ToString())) continue;
-        propSetNames.Add(propSet.Name.ToString());
-        
-        dynamic pSetDynamic = new ExpandoObject();
-        pSetDynamic.name = propSet.Name.ToString();
-        pSetDynamic.properties = new List<dynamic>();
-        
+        var psetName = propSet.Name.ToString();
+        if (!propSetNames.Add(psetName)) continue;
+
+        var pSetOutput = new PropertySetOutput { Name = psetName };
+
         foreach (var property in propSet.HasProperties)
         {
           if (property is IIfcPropertySingleValue propSingleValue)
           {
-            dynamic ppDynamic = new ExpandoObject();
-            ppDynamic.name = propSingleValue.Name.Value;
-            ppDynamic.value = propSingleValue.NominalValue == null
-              ? string.Empty
-              : propSingleValue.NominalValue.Value.ToString();
-            pSetDynamic.properties.Add(ppDynamic);
+            pSetOutput.Properties.Add(new PropertyOutput {
+              Name = propSingleValue.Name.Value.ToString(),
+              Value = propSingleValue.NominalValue == null
+                ? string.Empty
+                : propSingleValue.NominalValue.Value.ToString()
+            });
           }
         }
-        retVal.Add(pSetDynamic);
+        retVal.Add(pSetOutput);
       }
 
       return new MetaObject
@@ -262,7 +278,7 @@ namespace XeokitMetadata {
         name = element.Name,
         type = element.GetType().Name,
         parent = parentId,
-        propertySets = retVal
+        propertySets = retVal.Count > 0 ? retVal : null
       };
     }
 
@@ -278,9 +294,9 @@ namespace XeokitMetadata {
     /// <param name="parentObjId">Id of parent object.</param>
     private static void extractRelatedObjects(
       IIfcObjectDefinition objectDefinition,
-      ref List<MetaObject> metaObjects, 
+      ref List<MetaObject> metaObjects,
       string parentObjId){
-      
+
       var relatedObjects = objectDefinition
         .IsDecomposedBy
         .SelectMany(r => r.RelatedObjects);
@@ -308,6 +324,83 @@ namespace XeokitMetadata {
     }
 
     /// <summary>
+    ///   Streams the MetaModel directly to a JSON file using JsonTextWriter,
+    ///   avoiding the need to hold the entire JSON string in memory.
+    ///   For large models this can save 100-200+ MB of RAM compared to toJson().
+    /// </summary>
+    public void toJsonStreaming(string jsonPath) {
+      using var file = File.CreateText(jsonPath);
+      using var writer = new JsonTextWriter(file);
+      writer.Formatting = Formatting.None;
+
+      writer.WriteStartObject();
+
+      writer.WritePropertyName("id");
+      writer.WriteValue(this.id);
+      writer.WritePropertyName("projectId");
+      writer.WriteValue(this.projectId);
+      writer.WritePropertyName("author");
+      writer.WriteValue(this.author);
+      writer.WritePropertyName("createdAt");
+      writer.WriteValue(this.createdAt);
+      writer.WritePropertyName("schema");
+      writer.WriteValue(this.schema);
+      writer.WritePropertyName("creatingApplication");
+      writer.WriteValue(this.creatingApplication);
+
+      writer.WritePropertyName("metaObjects");
+      writer.WriteStartArray();
+
+      if (this.metaObjects != null) {
+        foreach (var obj in this.metaObjects) {
+          writer.WriteStartObject();
+
+          writer.WritePropertyName("id");
+          writer.WriteValue(obj.id);
+          writer.WritePropertyName("name");
+          writer.WriteValue(obj.name);
+          writer.WritePropertyName("type");
+          writer.WriteValue(obj.type);
+          writer.WritePropertyName("parent");
+          writer.WriteValue(obj.parent);
+
+          if (obj.propertySets != null && obj.propertySets.Count > 0) {
+            writer.WritePropertyName("propertySets");
+            writer.WriteStartArray();
+
+            foreach (var pset in obj.propertySets) {
+              writer.WriteStartObject();
+              writer.WritePropertyName("name");
+              writer.WriteValue(pset.Name);
+
+              writer.WritePropertyName("properties");
+              writer.WriteStartArray();
+
+              foreach (var prop in pset.Properties) {
+                writer.WriteStartObject();
+                writer.WritePropertyName("name");
+                writer.WriteValue(prop.Name);
+                writer.WritePropertyName("value");
+                writer.WriteValue(prop.Value);
+                writer.WriteEndObject();
+              }
+
+              writer.WriteEndArray();
+              writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+          }
+
+          writer.WriteEndObject();
+        }
+      }
+
+      writer.WriteEndArray();
+      writer.WriteEndObject();
+    }
+
+    /// <summary>
     ///   The method serialises the MetaModel object to a JSON string.
     /// </summary>
     /// <returns>Returns the serialized JSON string.</returns>
@@ -315,13 +408,13 @@ namespace XeokitMetadata {
       var contractResolver = new DefaultContractResolver {
         NamingStrategy = new CamelCaseNamingStrategy()
       };
-      
+
       var settings = new JsonSerializerSettings {
         ContractResolver = contractResolver,
         Formatting = Formatting.None
       };
-      
+
       return JsonConvert.SerializeObject(this, settings);
     }
-  }  
+  }
 }

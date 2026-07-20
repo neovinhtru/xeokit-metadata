@@ -19,7 +19,7 @@
 
     <ItemGroup>
       <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
-      <PackageReference Include="Xbim.Essentials" Version="6.0.445" />
+      <PackageReference Include="Xbim.Essentials" Version="6.0.587" />
     </ItemGroup>
 
 </Project>
